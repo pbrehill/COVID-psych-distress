@@ -1,0 +1,382 @@
+---
+title: "Understanding the effect of COVID lockdowns in Australia on psychological distress"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+```{r Load in code / libraries, include = FALSE}
+source('wrangle_data.R')
+source('helpers.R')
+library(plotly)
+library(did)
+library(car)
+library(haven)
+library(zoo)
+
+knitr::opts_chunk$set(
+  echo = FALSE, fig.width = 6, fig.align = 'center', warning = FALSE, message = FALSE
+)
+```
+
+
+```{r Clean data, include = FALSE}
+did_data <- did_data %>%
+  filter(!is.na(RegionCode),
+         !is.na(long_k6)) %>%
+  mutate(lockdown = as.numeric(C6 > 1),
+         uid = factor(paste0(Jurisdiction, CityCode)),
+         wave_fac = factor(wave),
+         wave_num = wave_fac %>% as.numeric(),
+         k6_binary = as.numeric(long_k6 >= 13),
+         cluster = factor(paste0(p_state, noncap)),
+         long_k6_norm = long_k6 %>% as.numeric() #/ sd(long_k6, na.rm = T)
+         ) %>%
+  # Hardcode QLD to no lockdown as there was a very brief spell during this wave that does not meet the standard 
+  mutate(lockdown = ifelse(RegionCode == "AUS_QLD" & wave_num > 6, 0, lockdown))
+```
+
+```{r include = FALSE}
+covars <- as.formula(paste("~ ", paste(did_data %>% select(female:seifa_q5, noncap) %>% names(), collapse= "+")))
+```
+
+```{r include = FALSE}
+waves_data <- did_data$date %>% unique() %>% as.Date() %>% as.numeric() %>% as.data.frame() %>% `names<-`(c("Wave"))
+
+period2 <- did_data %>% filter(date >= "2021-01-01") %>% first_treated()
+period1 <- did_data %>% filter(date <= "2021-01-01") %>%
+  mutate(lockdown = (1 - lockdown))  %>% first_treated()
+```
+
+# Basic info
+
+```{r Get respondent counts by wave}
+did_data %>%
+  group_by(RegionCode, noncap) %>%
+  summarise(count = length(unique(anu_id))) %>%
+  na.omit()
+```
+
+
+```{r Figure 2}
+overall_plot <- did_data %>%
+    filter(!is.na(long_k6)) %>%
+    mutate(major_region = car::recode(RegionCode, "
+                                      'AUS_VIC' = 'VIC';
+                                      'AUS_NSW' = 'NSW';
+                                      'AUS_ACT' = NA;
+                                      else = 'Other region'
+                                      "),
+           ) %>%
+    group_by(anu_id) %>%
+    mutate(highlow = (dplyr::first(long_k6 %>% as_factor() %>% as.numeric) + 5) > 12) %>%
+    ungroup() %>%
+    filter(!is.na(major_region)) %>%
+    group_by(major_region, date, highlow) %>%
+    summarise(avg_distress = mean(long_k6, na.rm = TRUE),
+              se = sd(long_k6, na.rm = TRUE)/sqrt(n())) %>%
+    ggplot(aes(x = `date`, y = avg_distress, color = major_region, linetype = highlow)) +
+    geom_line() +
+    geom_point() +
+    geom_errorbar(aes(ymin=avg_distress-se, ymax=avg_distress+se), width=.1) +
+    ggtitle("K6 for selected jurisdictions over time")
+
+overall_plot %>% ggplotly()
+```
+
+
+```{r Figure 1}
+state_orderings <- c("AUS_NSW", "AUS_VIC", "AUS_QLD", "AUS_WA", "AUS_SA", "AUS_TAS", "AUS_NT", "AUS_ACT")
+
+big_df %>%
+  mutate(`In lockdown` = factor(C6 > 1, labels = c("Not locked down", "Locked down")),
+         Region = factor(noncap, labels = c("Capital city", "Outside capital city")),
+         `State / Territory` = factor(RegionCode, levels = state_orderings, labels = state_orderings %>% str_replace("AUS_", ""))
+         ) %>%
+  filter(date < "2022-01-01") %>%
+  ggplot(aes(x = date, fill = `In lockdown`, y = 1)) +
+    geom_col() +
+    scale_fill_manual(values = c("lightblue", "darkblue")) +
+    facet_grid(rows = vars(`State / Territory`), cols = vars(Region)) +
+    geom_vline(xintercept = as.Date(waves_w_outcome[1:length(waves_w_outcome) - 1], origin = "1970-01-01"),
+               alpha = 1, color="red") +
+    theme_void()+ # use theme_minimal or another theme instead of theme_void
+    theme(
+      legend.position = "bottom",
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6), # adjust text angle if needed
+      axis.title.x = element_text(), # bold x-axis title
+      axis.ticks.x = element_line(color = "black") # ensure tick marks are shown
+    ) +
+    scale_x_date(date_labels = "%b %y", date_breaks = "3 months") # format x-axis date labels
+```
+
+
+## Period 1 - March to October 2020
+
+For this period, I take the lifting of lockdown to be the policy we're evaluating. The groups as listed here are the cohorts period in which the cohort first had their lockdown lifted.
+
+Group 4 is SA, NT and ACT
+
+Group 5 is NSW, QLD and TAS
+
+I cut off the analysis at the sixth wave because we don't have K6 data for this wave and we benefit from keeping regional VIC in the 'never-treated' control group anyway. Remoteness seems to be by far the most important covariate to adjust for and obviously we lack common support if metro VIC is our only control group. It is worth noting we can never get an estimate for regional VIC in the seventh wave because we lack a valid control group to compare them against.
+
+This analysis uses a control group that is the never-treated observations. This is the standard CS approach (it essentially trades off efficiency for robustness comapred to a not-yet-treated approach) but again, we would lack common support for regional VIC anyway so it's not a loss that it means we can't get that estimate. It may shrink confidence intervals for the Group 4 estimate because we could compare them with Group 5 along with the never-treated, but I think it's the small size of the treatment group which is leading to the large standard errors here.
+
+```{r}
+out1 <- att_gt(yname = "long_k6_norm",
+              gname = "min_wave",
+              idname = "anu_id",
+              tname = "wave_num",
+              xformla = covars,
+              data = period1,
+              control_group = "nevertreated",
+              clustervars = "cluster",
+              est_method = "dr"
+              )
+
+
+summary(out2) %>%
+  data.frame() %>%
+  mutate(sd_terms = `ATT(g,t)` / sd(did_data$long_k6_norm, na.rm = T))
+```
+
+```{r}
+ggdid(out2, title = "Group Time ATTs for 2020 lockdowns", height = 7) +
+  scale_y_continuous(limits = c(-2.5, 1.5))
+ggsave('figures/2020-GTATTs.png')
+```
+
+We see that parallel trends seems to hold over the very short pre-treatment period but there is not a clear treatment effect, the Group 4 effect is not statistically significantly different from zero and has large error bars due to the small sample size for this group. Group 5 shows a measurable negative effect (i.e. a reduction in distress) of -0.580 points in its one post-treatment period.
+
+```{r}
+# aggregate them into event study plot
+did_es <- aggte(out2, type="dynamic", na.rm = T)
+
+# plot the event study
+ggdid(did_es, title = "Event study for 2020 lockdowns")
+```
+
+Grouping all the states and territories up into an event study we can see that there seems to be an effect across units. The reason for the huge difference in standard errors between period 0 and period 1 is that we never estimate an effect for NSW, QLD and TAS in period 1 for the reasons discussed above.
+
+## Period 2 - June to October 2021
+
+For this period, we can just look at the imposition of lockdowns, the data is much better, there is an easy never-treated control group and apart from having to assume there are no time-varying effects of the earlier lockdowns that are still occurring, it is a much cleaner analysis. Unexpectedly though, we see no effect from the imposition of the lockdowns or the lifting of lockdowns. This makes some amount of sense having seen the plots of K6 by state but it is still a finding I'm struggling to explain.
+
+Group 10 is NSW, metro VIC and regional QLD.
+
+Group 11 is ACT and regional VIC
+
+While not all these groups ended their lockdowns at the same point in time and I could in theory further divide these groups up by when their lockdowns ended to get a full dynamic treatment effect of imposing and lifting lockdowns, there is clearly no effect in the data that suggests there is an effect for either turning on or off the policy.
+
+Note that the plots below say that some jurisdictions are treated even once the treatment has been lifted. I thought it was still useful to present this to you even if we don't use this in the presentation / paper.
+
+```{r}
+out <- att_gt(yname = "long_k6_norm",
+              gname = "min_wave",
+              idname = "anu_id",
+              tname = "wave_num",
+              xformla = covars,
+              data = period2,
+              clustervars = "cluster",
+              est_method = "dr"
+              )
+```
+```{r}
+summary(out) %%
+  mutate(beta = `ATT(g,t)` / did_data$long_k6_norm)
+```
+
+```{r}
+ggdid(out, title = "Group Time ATTs for 2021 lockdowns") +
+  scale_y_continuous(limits = c(-3, 3
+                                ))
+```
+
+Note that the irregular spacing of waves makes a long event-study plot like this questionable but I think it is useful to see because there is clearly no effect anyway.
+
+```{r}
+# aggregate them into event study plot
+did_es <- aggte(out, type="dynamic")
+summary(did_es)
+```
+
+```{r}
+# plot the event study
+ggdid(did_es, title = "Event study for 2021 lockdowns")
+```
+
+# What is driving patterns in distress during COVID?
+
+This analysis raises three questions for me that I'm sure you two have thoughts on. 
+
+## Why do lockdowns seem to not have an effect on wellbeing beyond the 2020?
+
+It seems that there isn't a clear effect that every lockdown has on distress, but this doesn't mean COVID wasn't having an impact. If you look at the plots from the start of this doc again, you'll see that distress tends to rise everywhere during periods where there are lockdowns / outbreaks / heightened COVID anxieties. Unfortunately because these three things co-occur, it is hard to know what is actually having the distressing effect. However, it is worth keeping in mind, the lack of a statistically significant ATT seems to me to be not due to a lack of change in the treated jurisdiction, but a shared change in both treatment and control jurisdictions.
+
+## What is driving that 'scarring' effect after the 2020 lockdowns (if you think there is one)?
+
+This seems to be very much in your area of expertise Ben so I won't speculate too much about this and defer to you, but it seems that there might be a distressing effect from the lockdowns that didn't really go away at least until after the pandemic as a whole subsided. Could this could be due to the lockdowns and local cases in VIC and NSW being a signal of the severity of COVID which drove anxiety above that experienced by other jurisdictions?
+
+## Are there conditional ATTs that might be interesting to explore?
+
+Is there triple differences analysis that might be interesting e.g. the effect of lockdowns on parents, particularly mums? I haven't done any of this for now, partiuclarly given the mixed results but I'm happy to dig into this if you have hypotheses that you want to test.
+
+# Heterogeneity - Period 1
+
+```{r Read in variable families, this links encoded variables}
+# This is a small spreadsheet that was made manually to link for example different age bracket variables to the construct of Age.
+variable_families <- read_csv("variable_families.csv")
+```
+
+
+```{r explicitly add base cases}
+period1$male <- 1 - period1$female
+period2$male <- 1 - period2$female
+
+# Non indigenous
+period1$nindig <- 1 - period1$indig
+period2$nindig <- 1 - period2$indig
+
+# No LOTE
+period1$nlote <- 1 - period1$lote
+period2$nlote <- 1 - period2$lote
+
+# Aged 35 to 44
+period1$age35_44 <- 1 - rowSums(period1 %>% select(starts_with("age")))
+period2$age35_44 <- 1 - rowSums(period2 %>% select(starts_with("age")))
+
+# Add yr 12 education
+period1$yr12 <- 1 - rowSums(period1 %>% select(lessyr12, pgrad, ugrad, cert3plus))
+period2$yr12 <- 1 - rowSums(period2 %>% select(lessyr12, pgrad, ugrad, cert3plus))
+
+# Add SEIFA Q3
+period1$seifa_q3 <- 1 - rowSums(period1 %>% select(starts_with("seifa")))
+period2$seifa_q3 <- 1 - rowSums(period2 %>% select(starts_with("seifa")))
+
+# Add Australian born
+period1$oz_born <- 1 - rowSums(period1 %>% select(ends_with("esb")))
+period2$oz_born <- 1 - rowSums(period2 %>% select(ends_with("esb")))
+```
+
+
+```{r Run analysis for Period 1}
+out_triple_period1 <- map(period1 %>% select(male:oz_born, female:seifa_q5), function(variable) {
+  tryCatch({
+    att_gt(yname = "long_k6_norm",
+              gname = "min_wave",
+              idname = "anu_id",
+              tname = "wave_num",
+              # xformla = "",
+              data = period1[as.logical(variable),],
+              control_group = "nevertreated",
+              clustervars = "cluster",
+              est_method = "dr"
+      )
+  },
+    error=function(cond) {
+            message(paste0("Here's the original error message: ", cond))
+            # Choose a return value in case of error
+            return(NA)
+        }
+  )
+  })
+
+triple_p1 <- out_triple_period1 %>%
+  map2(names(out_triple_period1), function(x, y) {
+    out <- data.frame(g = x$group, t = x$t, att = x$att, se = x$se)
+    names(out) <- c("g", "t", paste0(y,"_att"), paste0(y,"_se"))
+    out
+  }) %>% 
+  bind_cols()
+
+p1_graphs <- out_triple_period1 %>%
+  map2(names(out_triple_period1), function(x, x_name) {
+    ggdid(x, title = paste0(x_name, " Group Time ATTs for 2021 lockdowns"))
+  })
+
+
+het_p1 <- triple_p1 %>% 
+  filter(g...1 == t...2) %>% 
+  select(-matches("\\.\\.\\."), g...1, t...2) %>%
+  rename(g = g...1, time = t...2) %>%
+  pivot_longer(
+                        cols = -c("g", "time"), 
+                        names_to = c("group", ".value"), 
+                        names_pattern = "(.*)_(att|se)") %>%
+  mutate(flag = ifelse(se * 1.96 < abs(att), "*", ""))
+
+het_p1$n <- map2_int(het_p1$time, het_p1$group, function(time, variable) {
+  filter(period1, 
+       time == period1$min_wave, 
+       pull(period1[variable]) == 1,
+       period1$wave_num == time
+) %>% nrow()
+})
+
+het_p1_diff <- z_test_coefficients(het_p1, variable_families)
+het_p1_diff
+```
+
+
+```{r Run analysis for Period 2}
+out_triple_period2 <- map(period2 %>% select(male:oz_born, female:seifa_q5), function(variable) {
+  tryCatch({
+    att_gt(yname = "long_k6_norm",
+              gname = "min_wave",
+              idname = "anu_id",
+              tname = "wave_num",
+              # xformla = "",
+              data = period2[as.logical(variable),],
+              control_group = "nevertreated",
+              clustervars = "cluster",
+              est_method = "dr"
+      )
+  },
+    error=function(cond) {
+            message(paste0("Here's the original error message: ", cond))
+            # Choose a return value in case of error
+            return(NA)
+        }
+  )
+  })
+
+p2_graphs <- out_triple_period2 %>%
+  map2(names(out_triple_period2), function(x, x_name) {
+    ggdid(out, title = paste0(x_name, " Group Time ATTs for 2021 lockdowns"))
+  })
+
+triple_p2 <- out_triple_period2 %>%
+  map2(names(out_triple_period2), function(x, y) {
+    out <- data.frame(g = x$group, t = x$t, att = x$att, se = x$se)
+    names(out) <- c("g", "t", paste0(y,"_att"), paste0(y,"_se"))
+    out
+  }) %>% 
+  bind_cols()
+
+het_p2 <- triple_p2 %>% 
+  filter(g...1 == t...2) %>% 
+  select(-matches("\\.\\.\\."), g...1, t...2) %>%
+  rename(g = g...1, time = t...2) %>%
+  pivot_longer(
+                        cols = -c("g", "time"), 
+                        names_to = c("group", ".value"), 
+                        names_pattern = "(.*)_(att|se)") %>%
+  mutate(
+    flag = ifelse(se * 1.96 < abs(att), "*", ""),
+  )
+
+het_p2$n <- map2_int(het_p2$time, het_p2$group, function(time, variable) {
+  filter(period2, 
+       time == period2$min_wave, 
+       pull(period2[variable]) == 1,
+       period2$wave_num == time
+) %>% nrow()
+})
+
+het_p2_diff <- z_test_coefficients(het_p2, variable_families)
+het_p2_diff
+```

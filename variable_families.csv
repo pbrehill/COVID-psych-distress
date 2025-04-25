@@ -1,0 +1,53 @@
+﻿var,family,basecase
+female,Gender,1
+male,Gender,0
+age18_24,Age,0
+age25_34,Age,0
+age35_44,Age,1
+age45_54,Age,0
+age55_64,Age,0
+age65_74,Age,0
+age75plus,Age,0
+indig,Indigeneity,0
+nindig,Indigeneity,1
+born_esb,Place of birth,0
+born_nesb,Place of birth,0
+oz_born,Place of birth,1
+lote,First language,0
+nlote,First language,1
+lessyr12,First language,0
+yr12,Education,1
+cert3plus,Education,0
+ugrad,Education,0
+pgrad,Education,0
+seifa_q1,SEIFA,0
+seifa_q2,SEIFA,0
+seifa_q3,SEIFA,1
+seifa_q4,SEIFA,0
+seifa_q5,SEIFA,0
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
+,,
